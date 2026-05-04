@@ -276,6 +276,63 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
             os.remove(tmp_path)
 
 
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle photo messages by downloading and passing the file path to Claude."""
+    user_id = update.effective_user.id
+    if ALLOWED_USERS and user_id not in ALLOWED_USERS:
+        await update.message.reply_text("Not authorized.")
+        return
+
+    # Telegram delivers multiple resolutions; the last is the largest.
+    photo = update.message.photo[-1]
+    caption = (update.message.caption or "").strip()
+
+    await update.message.chat.send_action("typing")
+
+    file = await context.bot.get_file(photo.file_id)
+    with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False, prefix="tg-photo-") as tmp:
+        tmp_path = tmp.name
+    await file.download_to_drive(tmp_path)
+
+    try:
+        instruction = caption or "Describe this image."
+        prompt = (
+            f"The user attached an image saved at {tmp_path}. "
+            f"Use the Read tool to view it, then respond to: {instruction}"
+        )
+
+        sessions = load_sessions()
+        session_id = sessions.get(str(user_id))
+
+        if session_id:
+            response, new_session_id = run_claude(prompt, session_id)
+            if response is None:
+                del sessions[str(user_id)]
+                save_sessions(sessions)
+                session_id = None
+
+        if not session_id:
+            response, new_session_id = run_claude(CONTEXT_PROMPT + prompt)
+
+        if new_session_id:
+            sessions[str(user_id)] = new_session_id
+            save_sessions(sessions)
+
+        response = markdown_to_telegram_html(response)
+
+        if not response or not response.strip():
+            response = "(No response from Claude)"
+
+        if len(response) > 4000:
+            response = response[:4000] + "\n\n... (truncated)"
+
+        await update.message.reply_text(response, parse_mode="HTML")
+
+    finally:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+
+
 async def new_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     sessions = load_sessions()
@@ -310,6 +367,7 @@ def main():
     app.add_handler(CommandHandler("new", new_session))
     app.add_handler(CommandHandler("status", status))
     app.add_handler(MessageHandler(filters.VOICE, handle_voice))
+    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     print("Bot running. Send messages on Telegram.")
