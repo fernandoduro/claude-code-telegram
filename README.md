@@ -52,7 +52,8 @@ Claude will walk you through:
 | `telegram-bot.py` | Receives messages from Telegram → sends to Claude Code |
 | `skills/telegram-sender/` | Lets Claude send messages TO you |
 | `skills/daily-brief/` | Example scheduled skill using telegram-sender |
-| `launchd/` | Templates for running bot + scheduled skills |
+| `launchd/` | macOS templates for running bot + scheduled skills |
+| `systemd/` | Linux/WSL user-unit templates for running bot + scheduled skills |
 
 ## How It Works
 
@@ -104,35 +105,65 @@ cp -r skills/telegram-sender ~/.claude/skills/
 python telegram-bot.py
 ```
 
-### 8. Run Bot (launchd - Recommended)
+### 8. Run Bot Continuously
+
+**macOS (launchd):**
 ```bash
 # Edit launchd/com.claude.telegram-bot.plist with your paths
 cp launchd/com.claude.telegram-bot.plist ~/Library/LaunchAgents/
 launchctl load ~/Library/LaunchAgents/com.claude.telegram-bot.plist
 ```
 
+**Linux / WSL (systemd user units):**
+```bash
+mkdir -p ~/.config/systemd/user
+cp systemd/com.claude.telegram-bot.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now com.claude.telegram-bot.service
+```
+
+See [`systemd/README.md`](systemd/README.md) for full instructions, the
+daily-brief timer, the `loginctl enable-linger` step, and WSL2-specific
+caveats.
+
 ## Bot Commands
 
 - `/new` - Clear session, start fresh
 - `/status` - Show session status
 
-## Voice Messages (Apple Silicon)
+## Voice Messages
 
+**Apple Silicon (built in):**
 ```bash
 pip install mlx-whisper
 ```
 
-Voice messages will be transcribed locally and sent to Claude.
+**Linux / WSL / Intel Mac:** `mlx-whisper` is Apple-Silicon-only. Use
+`faster-whisper` instead — it runs on CPU (and CUDA if available) and is
+a drop-in replacement for the `transcribe_audio()` call. A small patch to
+`telegram-bot.py` is needed; see issue/PR if not yet merged.
+
+Voice messages are transcribed locally and sent to Claude.
 
 ## Example: Daily Briefing
 
 The `skills/daily-brief/` shows how to create a scheduled skill that sends you a morning briefing via Telegram. See `skills/daily-brief/SKILL.md` for details.
 
 To schedule it:
+
+**macOS (launchd):**
 ```bash
 # Edit launchd/com.claude.daily-brief.plist with your paths
 cp launchd/com.claude.daily-brief.plist ~/Library/LaunchAgents/
 launchctl load ~/Library/LaunchAgents/com.claude.daily-brief.plist
+```
+
+**Linux / WSL (systemd user units):**
+```bash
+cp systemd/com.claude.daily-brief.service ~/.config/systemd/user/
+cp systemd/com.claude.daily-brief.timer   ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now com.claude.daily-brief.timer
 ```
 
 ## Security

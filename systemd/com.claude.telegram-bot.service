@@ -1,0 +1,29 @@
+[Unit]
+Description=Claude Code Telegram bot
+Documentation=https://github.com/seedprod/claude-code-telegram
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# UPDATE if your repo lives elsewhere. %h expands to your home directory.
+WorkingDirectory=%h/claude-code-telegram
+
+# UPDATE: point at your Python. Default assumes you ran `uv venv` (or
+# `python -m venv .venv`) inside the repo. If using system Python, set
+# ExecStart to: /usr/bin/python3 %h/claude-code-telegram/telegram-bot.py
+ExecStart=%h/claude-code-telegram/.venv/bin/python %h/claude-code-telegram/telegram-bot.py
+
+# UPDATE if `claude` (or other tools) live in a different PATH on your system.
+# Add any runtime-manager shims you use (mise, asdf, volta, nvm, etc).
+Environment=PATH=/usr/local/bin:/usr/bin:/bin:%h/.local/bin
+
+# launchd's KeepAlive=true equivalent
+Restart=always
+RestartSec=5
+
+# Logs go to the journal: `journalctl --user -u com.claude.telegram-bot -f`
+
+[Install]
+WantedBy=default.target

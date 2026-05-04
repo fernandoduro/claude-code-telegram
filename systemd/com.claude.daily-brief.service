@@ -1,0 +1,15 @@
+[Unit]
+Description=Run Claude Code daily brief
+
+[Service]
+Type=oneshot
+
+# UPDATE: workspace with the CLAUDE.md you want loaded as context.
+WorkingDirectory=%h/your-workspace
+
+# UPDATE if `claude` lives in a different PATH.
+Environment=PATH=/usr/local/bin:/usr/bin:/bin:%h/.local/bin
+
+ExecStart=/usr/bin/env claude -p "Run the daily-brief skill" --allowedTools Read,WebSearch,Bash,Skill
+
+# Logs go to the journal: `journalctl --user -u com.claude.daily-brief`

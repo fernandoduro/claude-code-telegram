@@ -1,0 +1,15 @@
+[Unit]
+Description=Trigger Claude Code daily brief at 7am
+Requires=com.claude.daily-brief.service
+
+[Timer]
+# Every day at 7:00 local time. See `man systemd.time` for the calendar syntax.
+OnCalendar=*-*-* 07:00:00
+
+# If the machine was off at 07:00, run on next boot.
+Persistent=true
+
+Unit=com.claude.daily-brief.service
+
+[Install]
+WantedBy=timers.target
