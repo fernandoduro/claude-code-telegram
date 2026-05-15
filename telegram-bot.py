@@ -15,6 +15,7 @@ import json
 import os
 import html
 import tempfile
+from datetime import datetime
 from pathlib import Path
 import mistune
 from telegram import Update
@@ -52,6 +53,56 @@ def load_sessions() -> dict:
 
 def save_sessions(sessions: dict):
     SESSION_FILE.write_text(json.dumps(sessions, indent=2))
+
+
+def get_session_state(user_id: int) -> tuple[str | None, str]:
+    """Return (session_id, cwd) for user. cwd falls back to WORKSPACE.
+
+    Tolerates legacy entries that stored just the session_id string.
+    """
+    entry = load_sessions().get(str(user_id))
+    if entry is None:
+        return None, WORKSPACE
+    if isinstance(entry, str):
+        return entry, WORKSPACE
+    return entry.get("session_id"), entry.get("cwd") or WORKSPACE
+
+
+def set_session_state(user_id: int, session_id: str, cwd: str):
+    sessions = load_sessions()
+    sessions[str(user_id)] = {"session_id": session_id, "cwd": cwd}
+    save_sessions(sessions)
+
+
+def clear_session(user_id: int):
+    sessions = load_sessions()
+    if str(user_id) in sessions:
+        del sessions[str(user_id)]
+        save_sessions(sessions)
+
+
+def find_sessions_by_prefix(prefix: str) -> list[tuple[str, str]]:
+    """Return [(session_id, cwd), ...] for session files whose stem starts with prefix."""
+    projects_dir = Path.home() / ".claude" / "projects"
+    out = []
+    if not projects_dir.exists():
+        return out
+    for jsonl in projects_dir.rglob(f"{prefix}*.jsonl"):
+        cwd = ""
+        try:
+            with jsonl.open(encoding="utf-8", errors="replace") as f:
+                for line in f:
+                    try:
+                        ev = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if ev.get("cwd"):
+                        cwd = ev["cwd"]
+                        break
+        except OSError:
+            continue
+        out.append((jsonl.stem, cwd or str(Path.home())))
+    return out
 
 
 def transcribe_audio(audio_path: str) -> str:
@@ -147,7 +198,7 @@ CONTEXT_PROMPT = """First, silently read CLAUDE.md for context.
 Then respond to: """
 
 
-def run_claude(message: str, session_id: str = None) -> tuple[str, str]:
+def run_claude(message: str, session_id: str = None, cwd: str = None) -> tuple[str, str]:
     """Run Claude and return (response, new_session_id). Handles expired sessions."""
     cmd = [
         CLAUDE_PATH, "-p", message,
@@ -158,7 +209,7 @@ def run_claude(message: str, session_id: str = None) -> tuple[str, str]:
     if session_id:
         cmd.extend(["--resume", session_id])
 
-    result = subprocess.run(cmd, capture_output=True, text=True, cwd=WORKSPACE)
+    result = subprocess.run(cmd, capture_output=True, text=True, cwd=(cwd or WORKSPACE))
 
     try:
         data = json.loads(result.stdout)
@@ -179,25 +230,21 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     message = update.message.text
-    sessions = load_sessions()
-    session_id = sessions.get(str(user_id))
+    session_id, cwd = get_session_state(user_id)
 
     await update.message.chat.send_action("typing")
 
     if session_id:
-        response, new_session_id = run_claude(message, session_id)
+        response, new_session_id = run_claude(message, session_id, cwd)
         if response is None:
-            del sessions[str(user_id)]
-            save_sessions(sessions)
+            clear_session(user_id)
             session_id = None
 
     if not session_id:
-        full_message = CONTEXT_PROMPT + message
-        response, new_session_id = run_claude(full_message)
+        response, new_session_id = run_claude(CONTEXT_PROMPT + message, cwd=cwd)
 
     if new_session_id:
-        sessions[str(user_id)] = new_session_id
-        save_sessions(sessions)
+        set_session_state(user_id, new_session_id, cwd)
 
     response = markdown_to_telegram_html(response)
 
@@ -242,24 +289,21 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await update.message.reply_text(f"📝 <i>{transcript}</i>", parse_mode="HTML")
 
-        sessions = load_sessions()
-        session_id = sessions.get(str(user_id))
+        session_id, cwd = get_session_state(user_id)
 
         await update.message.chat.send_action("typing")
 
         if session_id:
-            response, new_session_id = run_claude(transcript, session_id)
+            response, new_session_id = run_claude(transcript, session_id, cwd)
             if response is None:
-                del sessions[str(user_id)]
-                save_sessions(sessions)
+                clear_session(user_id)
                 session_id = None
 
         if not session_id:
-            response, new_session_id = run_claude(CONTEXT_PROMPT + transcript)
+            response, new_session_id = run_claude(CONTEXT_PROMPT + transcript, cwd=cwd)
 
         if new_session_id:
-            sessions[str(user_id)] = new_session_id
-            save_sessions(sessions)
+            set_session_state(user_id, new_session_id, cwd)
 
         response = markdown_to_telegram_html(response)
 
@@ -301,22 +345,19 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Use the Read tool to view it, then respond to: {instruction}"
         )
 
-        sessions = load_sessions()
-        session_id = sessions.get(str(user_id))
+        session_id, cwd = get_session_state(user_id)
 
         if session_id:
-            response, new_session_id = run_claude(prompt, session_id)
+            response, new_session_id = run_claude(prompt, session_id, cwd)
             if response is None:
-                del sessions[str(user_id)]
-                save_sessions(sessions)
+                clear_session(user_id)
                 session_id = None
 
         if not session_id:
-            response, new_session_id = run_claude(CONTEXT_PROMPT + prompt)
+            response, new_session_id = run_claude(CONTEXT_PROMPT + prompt, cwd=cwd)
 
         if new_session_id:
-            sessions[str(user_id)] = new_session_id
-            save_sessions(sessions)
+            set_session_state(user_id, new_session_id, cwd)
 
         response = markdown_to_telegram_html(response)
 
@@ -334,22 +375,106 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def new_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    sessions = load_sessions()
-    if str(user_id) in sessions:
-        del sessions[str(user_id)]
-        save_sessions(sessions)
+    clear_session(update.effective_user.id)
     await update.message.reply_text("Session cleared. Next message starts fresh.")
 
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    sessions = load_sessions()
-    has_session = str(user_id) in sessions
+    session_id, cwd = get_session_state(user_id)
+    home = str(Path.home())
+    cwd_disp = cwd.replace(home, "~", 1) if cwd.startswith(home) else cwd
     await update.message.reply_text(
         f"User ID: {user_id}\n"
-        f"Active session: {'Yes' if has_session else 'No'}\n"
+        f"Active session: {session_id[:8] if session_id else 'No'}\n"
+        f"Workspace: {cwd_disp}\n"
         f"Voice enabled: {'Yes' if VOICE_ENABLED else 'No'}"
+    )
+
+
+async def list_sessions(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if ALLOWED_USERS and user_id not in ALLOWED_USERS:
+        await update.message.reply_text("Not authorized.")
+        return
+
+    script = Path(__file__).parent / "bin" / "claude-sessions"
+    result = subprocess.run(
+        [str(script), "--format", "tab", "-n", "10"],
+        capture_output=True, text=True,
+    )
+    lines = (result.stdout or "").strip().splitlines()
+    if not lines:
+        err = (result.stderr or "").strip() or "No sessions found."
+        await update.message.reply_text(err)
+        return
+
+    home = str(Path.home())
+    blocks = ["<b>Recent Claude sessions</b>"]
+    for i, line in enumerate(lines, 1):
+        parts = line.split("\t", 3)
+        if len(parts) < 4:
+            continue
+        ts, sid, cwd, snippet = parts
+        # Show only HH:MM if the session is from today, else MM-DD HH:MM.
+        date_part, time_part = (ts.split(" ", 1) + [""])[:2]
+        today = datetime.now().strftime("%Y-%m-%d")
+        when = time_part if date_part == today else f"{date_part[5:]} {time_part}"
+        cwd_disp = cwd.replace(home, "~", 1) if cwd.startswith(home) else cwd
+        if len(snippet) > 90:
+            snippet = snippet[:89] + "…"
+        blocks.append(
+            f"\n<b>{i}.</b> <code>{html.escape(sid[:8])}</code> · "
+            f"{html.escape(when)} · <code>{html.escape(cwd_disp)}</code>\n"
+            f"<i>{html.escape(snippet)}</i>"
+        )
+    blocks.append(
+        "\n<i>Reply</i> <code>/resume &lt;id-prefix&gt;</code> "
+        "<i>to switch (e.g.</i> <code>/resume f25dc299</code><i>).</i>"
+    )
+
+    msg = "\n".join(blocks)
+    if len(msg) > 3900:
+        msg = msg[:3900] + "\n…"
+
+    await update.message.reply_text(msg, parse_mode="HTML")
+
+
+async def resume_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if ALLOWED_USERS and user_id not in ALLOWED_USERS:
+        await update.message.reply_text("Not authorized.")
+        return
+
+    args = context.args
+    if not args:
+        await update.message.reply_text(
+            "Usage: /resume <id-prefix>\nUse /sessions to list options."
+        )
+        return
+
+    prefix = args[0].strip()
+    matches = find_sessions_by_prefix(prefix)
+    if not matches:
+        await update.message.reply_text(f"No session found matching '{prefix}'.")
+        return
+
+    home = str(Path.home())
+    if len(matches) > 1:
+        lines = [f"Multiple matches for '{prefix}', be more specific:"]
+        for sid, cwd in matches[:10]:
+            cwd_disp = cwd.replace(home, "~", 1) if cwd.startswith(home) else cwd
+            lines.append(f"  {sid[:12]}  {cwd_disp}")
+        await update.message.reply_text("\n".join(lines))
+        return
+
+    sid, cwd = matches[0]
+    set_session_state(user_id, sid, cwd)
+    cwd_disp = cwd.replace(home, "~", 1) if cwd.startswith(home) else cwd
+    await update.message.reply_text(
+        f"Resumed session <code>{html.escape(sid[:8])}</code> in "
+        f"<code>{html.escape(cwd_disp)}</code>.\nSend a message to continue.",
+        parse_mode="HTML",
     )
 
 
@@ -366,6 +491,8 @@ def main():
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("new", new_session))
     app.add_handler(CommandHandler("status", status))
+    app.add_handler(CommandHandler("sessions", list_sessions))
+    app.add_handler(CommandHandler("resume", resume_session))
     app.add_handler(MessageHandler(filters.VOICE, handle_voice))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))

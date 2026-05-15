@@ -1,0 +1,127 @@
+#!/usr/bin/env python3
+"""List Claude Code sessions across all projects, sorted by recency.
+
+Examples:
+    claude-sessions                    # newest 20
+    claude-sessions -n 5               # newest 5
+    claude-sessions Lindris            # filter by path substring
+    claude-sessions --format tab       # tab-separated, machine-parseable
+"""
+import argparse
+import json
+import sys
+from datetime import datetime
+from pathlib import Path
+
+# Bot prepends this on first message of a session; strip when present so
+# the snippet shows the user's actual question, not the wrapper.
+BOT_CONTEXT_PROMPT = "First, silently read CLAUDE.md for context.\nThen respond to: "
+
+
+def decode_project_dir(dir_name: str) -> str:
+    """'-home-fernandoduro-Lindris' -> '/home/fernandoduro/Lindris'."""
+    return "/" + dir_name.lstrip("-").replace("-", "/")
+
+
+def first_user_message(path: Path) -> tuple[str, str]:
+    """Return (cwd, snippet) from the first user event in the JSONL."""
+    cwd = ""
+    try:
+        with path.open(encoding="utf-8", errors="replace") as f:
+            for line in f:
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if event.get("type") != "user":
+                    continue
+                if not cwd:
+                    cwd = event.get("cwd") or ""
+                msg = event.get("message") or {}
+                content = msg.get("content")
+                snippet = ""
+                if isinstance(content, str):
+                    snippet = content
+                elif isinstance(content, list):
+                    parts = [
+                        c.get("text", "")
+                        for c in content
+                        if isinstance(c, dict) and c.get("type") == "text"
+                    ]
+                    snippet = " ".join(parts)
+                if snippet:
+                    if snippet.startswith(BOT_CONTEXT_PROMPT):
+                        snippet = snippet[len(BOT_CONTEXT_PROMPT):]
+                    snippet = " ".join(snippet.split())  # collapse whitespace
+                    return cwd, snippet
+    except OSError:
+        pass
+    return cwd, "(no user messages)"
+
+
+def main() -> int:
+    p = argparse.ArgumentParser(
+        description="List Claude Code sessions, sorted by recency.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__,
+    )
+    p.add_argument("-n", "--recent", type=int, default=20,
+                   help="show N newest sessions (default 20)")
+    p.add_argument("path_filter", nargs="?", default=None,
+                   help="filter to sessions whose cwd contains this substring")
+    p.add_argument("--format", choices=("table", "tab"), default="table",
+                   help="table = human columns, tab = machine-parseable")
+    args = p.parse_args()
+
+    projects_dir = Path.home() / ".claude" / "projects"
+    if not projects_dir.exists():
+        print(f"No sessions directory at {projects_dir}", file=sys.stderr)
+        return 1
+
+    rows = []
+    for jsonl in projects_dir.rglob("*.jsonl"):
+        try:
+            mtime = jsonl.stat().st_mtime
+        except OSError:
+            continue
+        cwd, snippet = first_user_message(jsonl)
+        if not cwd:
+            cwd = decode_project_dir(jsonl.parent.name)
+        if args.path_filter and args.path_filter not in cwd:
+            continue
+        rows.append((mtime, jsonl.stem, cwd, snippet))
+
+    rows.sort(reverse=True)
+    rows = rows[:args.recent]
+
+    if not rows:
+        print("(no sessions match)", file=sys.stderr)
+        return 0
+
+    home = str(Path.home())
+    if args.format == "tab":
+        for mtime, sid, cwd, snippet in rows:
+            ts = datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M")
+            print(f"{ts}\t{sid}\t{cwd}\t{snippet}")
+        return 0
+
+    # table format
+    formatted = []
+    cwd_w = 0
+    for mtime, sid, cwd, snippet in rows:
+        ts = datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M")
+        short = sid[:8]
+        cwd_disp = cwd.replace(home, "~", 1) if cwd.startswith(home) else cwd
+        formatted.append((ts, short, cwd_disp, snippet))
+        cwd_w = max(cwd_w, len(cwd_disp))
+
+    for ts, sid, cwd, snippet in formatted:
+        if len(snippet) > 70:
+            snippet = snippet[:69] + "…"
+        print(f"{ts}  {sid}  {cwd:<{cwd_w}}  {snippet}")
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
